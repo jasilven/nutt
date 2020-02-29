@@ -1,0 +1,15 @@
+[package]
+name = "nutt"
+version = "0.1.0"
+authors = ["jasilven <jasilven@gmail.com>"]
+edition = "2018"
+
+[dependencies]
+tui = { git = "https://github.com/fdehau/tui-rs", feature= "termion"}
+termion = "1.5"
+failure = "0.1"
+chrono = "0.4"
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+log = "0.4.0"
+env_logger = "0.7"
