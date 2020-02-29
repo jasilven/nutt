@@ -1,5 +1,3 @@
-mod util;
-
 use chrono::prelude::*;
 use log::*;
 use std::fs::File;
