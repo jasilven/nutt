@@ -5,6 +5,7 @@ use std::io;
 use std::io::prelude::*;
 use std::io::Stdout;
 use std::process::Command;
+use termion::cursor::Goto;
 use termion::event::Key;
 use termion::input::MouseTerminal;
 use termion::input::TermRead;
@@ -104,8 +105,11 @@ fn compose(app: &mut App) -> Result<(), failure::Error> {
 
 fn refresh_index(app: &mut App) -> Result<(), failure::Error> {
     debug!("Refreshing index: {}", &app.search_term);
-
+    if app.search_term.is_empty() {
+        app.search_term = "tag:inbox".to_string();
+    }
     app.messages = message::parse_messages(&app.search_term)?;
+    app.selected = 0;
     app.state = AppState::Index;
 
     Ok(())
@@ -117,12 +121,16 @@ fn show_index(
 ) -> Result<(), failure::Error> {
     debug!("Showing index: {} messages", &app.messages.len());
 
+    let mut is_input = false;
+    let input = &mut String::new();
+
     loop {
+        terminal.hide_cursor()?;
         terminal.draw(|mut f| {
             let rects = Layout::default()
                 .direction(Direction::Vertical)
                 .horizontal_margin(1)
-                .constraints([Constraint::Percentage(100)].as_ref())
+                .constraints([Constraint::Length(3), Constraint::Min(1)].as_ref())
                 .split(f.size());
 
             let mut lines: Vec<Text> = vec![];
@@ -138,52 +146,119 @@ fn show_index(
                         &m.tags
                     )
                     .into(),
-                    if i == app.selected {
-                        app.style_selected
-                    } else {
+                    if is_input {
                         app.style_normal
+                    } else {
+                        match i == app.selected {
+                            true => app.style_selected,
+                            _ => app.style_normal,
+                        }
                     },
                 ));
             }
-
-            let title = &format!("{} notes", lines.len());
+            let search_text = match is_input {
+                true => Text::Raw(input.to_string().into()),
+                _ => Text::Raw(app.search_term.to_string().into()),
+            };
+            // render inputblock
             f.render_widget(
-                Paragraph::new(lines.iter())
-                    .block(Block::default().title(&title).borders(Borders::TOP))
+                Paragraph::new([search_text].iter())
+                    .style(Style::default().fg(if is_input {
+                        Color::Yellow
+                    } else {
+                        Color::White
+                    }))
+                    .block(
+                        Block::default()
+                            .title("limit")
+                            .borders(Borders::ALL)
+                            .border_style(Style::default().fg(if is_input {
+                                Color::Yellow
+                            } else {
+                                Color::White
+                            })),
+                    )
                     .alignment(Alignment::Left)
                     .wrap(true),
                 rects[0],
             );
-        })?;
 
-        match io::stdin().keys().next().unwrap() {
-            Ok(Key::Down) | Ok(Key::Char('j')) => {
-                if !app.messages.is_empty() && (app.selected < app.messages.len() - 1) {
-                    app.selected += 1;
-                } else {
-                    app.selected = app.selected;
+            // render index lines
+            f.render_widget(
+                Paragraph::new(lines.iter())
+                    .block(
+                        Block::default()
+                            .title(&format!("{} notes", lines.len()))
+                            .border_style(Style::default().fg(if !is_input {
+                                Color::Yellow
+                            } else {
+                                Color::White
+                            }))
+                            .borders(Borders::BOTTOM | Borders::LEFT | Borders::RIGHT),
+                    )
+                    .alignment(Alignment::Left)
+                    .wrap(true),
+                rects[1],
+            );
+        })?;
+        if is_input {
+            terminal.show_cursor()?;
+            write!(
+                terminal.backend_mut(),
+                "{}",
+                Goto(3 + input.len() as u16, 2)
+            )
+            .unwrap();
+            io::stdout().flush().ok();
+
+            match io::stdin().keys().next().unwrap() {
+                Ok(Key::Char('\n')) => {
+                    app.search_term = input.to_string();
+                    input.clear();
+                    app.state = AppState::Refresh;
+                    break;
                 }
-            }
-            Ok(Key::Up) | Ok(Key::Char('k')) => {
-                if !app.messages.is_empty() && app.selected > 0 {
-                    app.selected -= 1;
+                Ok(Key::Backspace) => {
+                    let _ = input.pop();
                 }
+                Ok(Key::Esc) => {
+                    is_input = false;
+                }
+                Ok(Key::Char(ch)) => (*input).push(ch),
+                _ => {}
             }
-            Ok(Key::Char('q')) => {
-                app.state = AppState::Exit;
-                break;
+        } else {
+            match io::stdin().keys().next().unwrap() {
+                Ok(Key::Down) | Ok(Key::Char('j')) => {
+                    if !app.messages.is_empty() && (app.selected < app.messages.len() - 1) {
+                        app.selected += 1;
+                    } else {
+                        app.selected = app.selected;
+                    }
+                }
+                Ok(Key::Up) | Ok(Key::Char('k')) => {
+                    if !app.messages.is_empty() && app.selected > 0 {
+                        app.selected -= 1;
+                    }
+                }
+                Ok(Key::Char('q')) => {
+                    app.state = AppState::Exit;
+                    break;
+                }
+                Ok(Key::Char('\n')) => {
+                    app.state = AppState::View;
+                    break;
+                }
+                Ok(Key::Char('m')) => {
+                    app.state = AppState::Compose;
+                    break;
+                }
+                Ok(Key::Char('l')) => is_input = true,
+                _ => {}
             }
-            Ok(Key::Char('\n')) => {
-                app.state = AppState::View;
-                break;
-            }
-            Ok(Key::Char('m')) => {
-                app.state = AppState::Compose;
-                break;
-            }
-            _ => {}
         }
     }
+
     Ok(())
 }
 
