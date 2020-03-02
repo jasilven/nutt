@@ -44,9 +44,9 @@ pub struct Message {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(untagged)]
-enum Node {
+pub enum Node {
     Msg(Message),
-    Children(Vec<Message>),
+    Children(Vec<Vec<Node>>),
 }
 
 pub fn body_attachments(
@@ -81,11 +81,35 @@ pub fn body_attachments(
     Ok((body.into(), attachments))
 }
 
-pub fn parse_messages(search_term: &str) -> Result<Vec<Message>, failure::Error> {
-    debug!("Parsing messages: {}", search_term);
-
+pub fn parse_thread(thread: &Vec<Node>) -> Result<Vec<Message>, failure::Error> {
     let mut result = vec![];
 
+    if let Some(Node::Msg(msg)) = thread.iter().cloned().next() {
+        let mut message = msg.clone();
+        for reply in thread.iter().skip(1) {
+            match reply {
+                Node::Children(childs) => {
+                    for child in childs {
+                        message.replys = parse_thread(&child)?;
+                    }
+                }
+                _ => bail!("Parse Error: expected children."),
+            }
+        }
+        result.push(message);
+    } else {
+        bail!("Parse Error: expected message, but got something else.")
+    }
+
+    Ok(result)
+}
+
+pub fn parse_messages(search_term: &str) -> Result<Vec<Message>, failure::Error> {
+    debug!("Parsing search result: {}", search_term);
+
+    let mut result: Vec<Message> = vec![];
+
+    // TODO: remove path (e.g. use env)
     let output = Command::new("/usr/bin/notmuch")
         .arg("show")
         .arg("--format=json")
@@ -96,22 +120,8 @@ pub fn parse_messages(search_term: &str) -> Result<Vec<Message>, failure::Error>
 
     for threads in threadset.iter() {
         for thread in threads.iter() {
-            if let Some(Node::Msg(msg)) = thread.iter().cloned().next() {
-                let mut message = msg.clone();
-                for reply in thread.iter().skip(1) {
-                    match reply {
-                        Node::Children(msgs) => {
-                            for m in msgs {
-                                message.replys.push(m.clone());
-                            }
-                        }
-                        _ => bail!("Parse Error: expected children."),
-                    }
-                }
-                result.push(message);
-            } else {
-                bail!("Parse Error: expected message, but got something else.")
-            }
+            let mut t = parse_thread(thread)?;
+            result.append(&mut t);
         }
     }
 

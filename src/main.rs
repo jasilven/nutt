@@ -28,9 +28,11 @@ enum AppState {
     Compose,
     Exit,
 }
+
+// TODO: refactor styles to own struct/configuration object
 struct App {
     state: AppState,
-    messages: Vec<message::Message>,
+    messages: Vec<(String, message::Message)>,
     selected: usize,
     selected_att: isize,
     search_term: String,
@@ -60,6 +62,39 @@ impl App {
     }
 }
 
+// TODO: check if this could be avoided and maybe merged with messages::parse...
+fn indented_list(
+    messages: &Vec<message::Message>,
+    prefix: &str,
+) -> Vec<(String, message::Message)> {
+    let mut result = vec![];
+    let title_len = 45;
+    for m in messages {
+        let title = format!(
+            "{}{}",
+            prefix,
+            &m.headers
+                .get("Subject")
+                .unwrap_or(&"<no subject>".to_string()),
+        )
+        .chars()
+        .take(45)
+        .collect::<String>();
+        result.push((
+            format!(
+                "{0:<12}  {1:2$} {3:?}\n",
+                &m.date_relative, &title, title_len, &m.tags
+            ),
+            m.clone(),
+        ));
+        for (title, reply) in indented_list(&m.replys, &format!("{}{}", prefix, "  ")).iter() {
+            result.push((title.clone(), reply.clone()));
+        }
+    }
+    result
+}
+
+// TODO: this sits here only as placeholder method. Whole thing should be implemented properly
 fn compose(app: &mut App) -> Result<(), failure::Error> {
     debug!("Compose called");
 
@@ -81,7 +116,6 @@ fn compose(app: &mut App) -> Result<(), failure::Error> {
         "<%Y%m%d%H%M%S.%f@localhost:{}>",
         std::process::id().to_string()
     );
-    // let id = now.format(id_fmt);
     let email = format!(
         "Date: {}\nTo: {}\nSubject: {}\nMessage-Id:{}\nFrom: {}\n\n{}\n",
         now.to_rfc2822(),
@@ -93,6 +127,7 @@ fn compose(app: &mut App) -> Result<(), failure::Error> {
     );
     file.write_all(email.as_bytes())?;
     file.flush()?;
+
     let _ = Command::new("/usr/bin/notmuch")
         .arg("insert")
         .stdin(file)
@@ -108,13 +143,16 @@ fn refresh_index(app: &mut App) -> Result<(), failure::Error> {
     if app.search_term.is_empty() {
         app.search_term = "tag:inbox".to_string();
     }
-    app.messages = message::parse_messages(&app.search_term)?;
+    let messages = message::parse_messages(&app.search_term)?;
+    app.messages = indented_list(&messages, "");
     app.selected = 0;
     app.state = AppState::Index;
 
     Ok(())
 }
 
+// TODO: refactor/split to smaller functions
+// TODO: simplify scrolling logic which is awful now
 fn show_index(
     app: &mut App,
     terminal: &mut Terminal<TermionBackend<AlternateScreen<MouseTerminal<RawTerminal<Stdout>>>>>,
@@ -123,10 +161,22 @@ fn show_index(
 
     let mut is_input = false;
     let input = &mut String::new();
+    let (mut scroll, mut scroll_max) = (0, 0);
+    let content_len = app.messages.len() as u16;
 
     loop {
         terminal.hide_cursor()?;
         terminal.draw(|mut f| {
+            use Color::*;
+            let view_height = f.size().height - 5;
+            if content_len > view_height {
+                scroll_max = content_len - view_height;
+            }
+
+            if app.selected as u16 >= view_height && scroll < scroll_max {
+                scroll += 1;
+            }
+
             let rects = Layout::default()
                 .direction(Direction::Vertical)
                 .horizontal_margin(1)
@@ -134,18 +184,9 @@ fn show_index(
                 .split(f.size());
 
             let mut lines: Vec<Text> = vec![];
-
-            for (i, m) in app.messages.iter().enumerate() {
+            for (i, (s, _m)) in app.messages.iter().enumerate() {
                 lines.push(Text::Styled(
-                    format!(
-                        "{:<12}  {:<40} {:?}\n",
-                        &m.date_relative,
-                        &m.headers
-                            .get("Subject")
-                            .unwrap_or(&"<no subject>".to_string()),
-                        &m.tags
-                    )
-                    .into(),
+                    s.into(),
                     if is_input {
                         app.style_normal
                     } else {
@@ -156,27 +197,21 @@ fn show_index(
                     },
                 ));
             }
-            let search_text = match is_input {
-                true => Text::Raw(input.to_string().into()),
-                _ => Text::Raw(app.search_term.to_string().into()),
+
+            let (input_color, index_color, search_text) = match is_input {
+                true => (Yellow, White, Text::Raw(input.to_string().into())),
+                _ => (White, Yellow, Text::Raw(app.search_term.to_string().into())),
             };
+
             // render inputblock
             f.render_widget(
                 Paragraph::new([search_text].iter())
-                    .style(Style::default().fg(if is_input {
-                        Color::Yellow
-                    } else {
-                        Color::White
-                    }))
+                    .style(Style::default().fg(input_color))
                     .block(
                         Block::default()
                             .title("limit")
                             .borders(Borders::ALL)
-                            .border_style(Style::default().fg(if is_input {
-                                Color::Yellow
-                            } else {
-                                Color::White
-                            })),
+                            .border_style(Style::default().fg(input_color)),
                     )
                     .alignment(Alignment::Left)
                     .wrap(true),
@@ -189,18 +224,16 @@ fn show_index(
                     .block(
                         Block::default()
                             .title(&format!("{} notes", lines.len()))
-                            .border_style(Style::default().fg(if !is_input {
-                                Color::Yellow
-                            } else {
-                                Color::White
-                            }))
+                            .border_style(Style::default().fg(index_color))
                             .borders(Borders::BOTTOM | Borders::LEFT | Borders::RIGHT),
                     )
+                    .scroll(scroll)
                     .alignment(Alignment::Left)
                     .wrap(true),
                 rects[1],
             );
         })?;
+
         if is_input {
             terminal.show_cursor()?;
             write!(
@@ -221,9 +254,7 @@ fn show_index(
                 Ok(Key::Backspace) => {
                     let _ = input.pop();
                 }
-                Ok(Key::Esc) => {
-                    is_input = false;
-                }
+                Ok(Key::Esc) => is_input = false,
                 Ok(Key::Char(ch)) => (*input).push(ch),
                 _ => {}
             }
@@ -239,6 +270,23 @@ fn show_index(
                 Ok(Key::Up) | Ok(Key::Char('k')) => {
                     if !app.messages.is_empty() && app.selected > 0 {
                         app.selected -= 1;
+                    }
+                    if app.selected as u16 <= scroll && scroll > 0 {
+                        scroll -= 1
+                    }
+                }
+
+                Ok(Key::Char('g')) => match io::stdin().keys().next().unwrap() {
+                    Ok(Key::Char('g')) => {
+                        scroll = 0;
+                        app.selected = 0;
+                    }
+                    _ => {}
+                },
+                Ok(Key::Char('G')) => {
+                    if !app.messages.is_empty() {
+                        scroll = scroll_max;
+                        app.selected = app.messages.len() - 1;
                     }
                 }
                 Ok(Key::Char('q')) => {
@@ -262,13 +310,14 @@ fn show_index(
     Ok(())
 }
 
+// TODO: refactor/split to smaller functions
 fn view_selected(
     app: &mut App,
     terminal: &mut Terminal<TermionBackend<AlternateScreen<MouseTerminal<RawTerminal<Stdout>>>>>,
 ) -> Result<(), failure::Error> {
     app.state = AppState::Index;
 
-    let msg = app
+    let (_, msg) = app
         .messages
         .get(app.selected)
         .ok_or(failure::format_err!("Selected message missing!"))?;
@@ -404,9 +453,10 @@ fn view_selected(
 
     Ok(())
 }
+
 fn show_attachment(
     id: &str,
-    (part, fname, mime): &(usize, String, String),
+    (part, fname, _mime): &(usize, String, String),
 ) -> Result<(), failure::Error> {
     let mut tmp = "/tmp/".to_string();
     tmp.push_str(&fname);
@@ -447,7 +497,9 @@ fn main() -> Result<(), failure::Error> {
                 show_index(&mut app, &mut terminal)?;
             }
             AppState::View => {
-                view_selected(&mut app, &mut terminal)?;
+                if !app.messages.is_empty() {
+                    view_selected(&mut app, &mut terminal)?;
+                }
             }
             AppState::Exit => {
                 break;
