@@ -1,5 +1,6 @@
 use chrono::prelude::*;
 use log::*;
+use std::fmt;
 use std::fs::File;
 use std::io;
 use std::io::prelude::*;
@@ -15,10 +16,93 @@ use termion::screen::AlternateScreen;
 use tui::backend::TermionBackend;
 use tui::layout::{Alignment, Constraint, Direction, Layout};
 use tui::style::{Color, Modifier, Style};
-use tui::widgets::{Block, Borders, Paragraph, Text};
+use tui::widgets::{Block, Borders, Paragraph, Row, Table, Text};
 use tui::Terminal;
 
 mod message;
+
+struct Messages {
+    list: Vec<(String, message::Message)>,
+    selected: u16,
+}
+
+impl Messages {
+    fn new(messages: &Vec<message::Message>) -> Self {
+        let msgs = Messages::build_messages(messages, "");
+        Messages {
+            list: msgs,
+            selected: 0,
+        }
+    }
+
+    fn build_messages(
+        messages: &Vec<message::Message>,
+        prefix: &str,
+    ) -> Vec<(String, message::Message)> {
+        let mut result = vec![];
+        let title_len = 45;
+        for m in messages {
+            let title = format!(
+                "{}{}",
+                prefix,
+                &m.headers
+                    .get("Subject")
+                    .unwrap_or(&"<no subject>".to_string()),
+            )
+            .chars()
+            .take(title_len)
+            .collect::<String>();
+            result.push((
+                format!(
+                    " . {: >19}  {1:-<2$}    {3}\n",
+                    &m.date_relative,
+                    &title,
+                    title_len,
+                    Tags(&m.tags)
+                ),
+                m.clone(),
+            ));
+            for (title, reply) in
+                Messages::build_messages(&m.replys, &format!("{}{}", prefix, "  ")).iter()
+            {
+                result.push((title.clone(), reply.clone()));
+            }
+        }
+        result
+    }
+
+    fn select_next(&mut self) {
+        if !self.list.is_empty() && self.selected < self.len() - 1 {
+            self.selected += 1;
+        }
+    }
+
+    fn select_prev(&mut self) {
+        if self.selected > 0 {
+            self.selected -= 1;
+        }
+    }
+
+    fn select_first(&mut self) {
+        self.selected = 0;
+    }
+
+    fn select_last(&mut self) {
+        self.selected = self.list.len() as u16 - 1;
+    }
+
+    fn get_selected(&self) -> Option<&(String, message::Message)> {
+        if !self.list.is_empty() {
+            self.list.get(self.selected as usize)
+        } else {
+            None
+        }
+    }
+
+    fn len(&self) -> u16 {
+        self.list.len() as u16
+    }
+}
 
 enum AppState {
     Refresh,
@@ -29,18 +113,36 @@ enum AppState {
     Exit,
 }
 
+struct Styles {
+    selected: Style,
+    header: Style,
+    normal: Style,
+    subject: Style,
+    attachment: Style,
+}
+
+struct Tags<'a>(&'a Vec<String>);
+
+impl<'a> fmt::Display for Tags<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut result = String::from("[");
+        self.0.iter().for_each(|s| {
+            result.push_str(&format!("{},", s));
+        });
+        result = result.trim_end_matches(',').to_string();
+        result.push(']');
+
+        write!(f, "{}", result)
+    }
+}
+
 // TODO: refactor styles to own struct/configuration object
 struct App {
     state: AppState,
-    messages: Vec<(String, message::Message)>,
-    selected: usize,
+    messages: Messages,
+    styles: Styles,
     selected_att: isize,
     search_term: String,
-    style_selected: Style,
-    style_header: Style,
-    style_normal: Style,
-    style_subject: Style,
-    style_attachment: Style,
 }
 
 impl App {
@@ -48,50 +150,19 @@ impl App {
         App {
             state: AppState::Refresh,
             search_term: "tag:inbox".to_string(),
-            messages: vec![],
-            selected: 0,
+            messages: Messages::new(&vec![]),
             selected_att: -1,
-            style_selected: Style::default().fg(Color::Yellow).modifier(Modifier::BOLD),
-            style_normal: Style::default().fg(Color::White),
-            style_header: Style::default().fg(Color::Cyan),
-            style_subject: Style::default()
-                .fg(Color::Rgb(255, 255, 255))
-                .modifier(Modifier::BOLD),
-            style_attachment: Style::default().fg(Color::Blue),
+            styles: Styles {
+                selected: Style::default().fg(Color::Yellow).modifier(Modifier::BOLD),
+                normal: Style::default().fg(Color::White),
+                header: Style::default().fg(Color::Cyan),
+                subject: Style::default()
+                    .fg(Color::Rgb(255, 255, 255))
+                    .modifier(Modifier::BOLD),
+                attachment: Style::default().fg(Color::Blue),
+            },
         }
     }
-}
-
-// TODO: check if this could be avoided and maybe merged with messages::parse...
-fn indented_list(
-    messages: &Vec<message::Message>,
-    prefix: &str,
-) -> Vec<(String, message::Message)> {
-    let mut result = vec![];
-    let title_len = 45;
-    for m in messages {
-        let title = format!(
-            "{}{}",
-            prefix,
-            &m.headers
-                .get("Subject")
-                .unwrap_or(&"<no subject>".to_string()),
-        )
-        .chars()
-        .take(45)
-        .collect::<String>();
-        result.push((
-            format!(
-                "{0:<12}  {1:2$} {3:?}\n",
-                &m.date_relative, &title, title_len, &m.tags
-            ),
-            m.clone(),
-        ));
-        for (title, reply) in indented_list(&m.replys, &format!("{}{}", prefix, "  ")).iter() {
-            result.push((title.clone(), reply.clone()));
-        }
-    }
-    result
 }
 
 // TODO: this sits here only as placeholder method. Whole thing should be implemented properly
@@ -140,12 +211,13 @@ fn compose(app: &mut App) -> Result<(), failure::Error> {
 
 fn refresh_index(app: &mut App) -> Result<(), failure::Error> {
     debug!("Refreshing index: {}", &app.search_term);
+
     if app.search_term.is_empty() {
         app.search_term = "tag:inbox".to_string();
     }
+
     let messages = message::parse_messages(&app.search_term)?;
-    app.messages = indented_list(&messages, "");
-    app.selected = 0;
+    app.messages = Messages::new(&messages);
     app.state = AppState::Index;
 
     Ok(())
@@ -157,23 +229,22 @@ fn show_index(
     app: &mut App,
     terminal: &mut Terminal<TermionBackend<AlternateScreen<MouseTerminal<RawTerminal<Stdout>>>>>,
 ) -> Result<(), failure::Error> {
+    use Color::*;
     debug!("Showing index: {} messages", &app.messages.len());
 
     let mut is_input = false;
     let input = &mut String::new();
     let (mut scroll, mut scroll_max) = (0, 0);
-    let content_len = app.messages.len() as u16;
 
     loop {
         terminal.hide_cursor()?;
         terminal.draw(|mut f| {
-            use Color::*;
             let view_height = f.size().height - 5;
-            if content_len > view_height {
-                scroll_max = content_len - view_height;
+            if app.messages.len() > view_height {
+                scroll_max = app.messages.len() - view_height;
             }
 
-            if app.selected as u16 >= view_height && scroll < scroll_max {
+            if app.messages.selected >= view_height && scroll < scroll_max {
                 scroll += 1;
             }
 
@@ -183,33 +254,17 @@ fn show_index(
                 .constraints([Constraint::Length(3), Constraint::Min(1)].as_ref())
                 .split(f.size());
 
-            let mut lines: Vec<Text> = vec![];
-            for (i, (s, _m)) in app.messages.iter().enumerate() {
-                lines.push(Text::Styled(
-                    s.into(),
-                    if is_input {
-                        app.style_normal
-                    } else {
-                        match i == app.selected {
-                            true => app.style_selected,
-                            _ => app.style_normal,
-                        }
-                    },
-                ));
-            }
-
             let (input_color, index_color, search_text) = match is_input {
                 true => (Yellow, White, Text::Raw(input.to_string().into())),
                 _ => (White, Yellow, Text::Raw(app.search_term.to_string().into())),
             };
 
-            // render inputblock
+            // render input
             f.render_widget(
                 Paragraph::new([search_text].iter())
                     .style(Style::default().fg(input_color))
                     .block(
                         Block::default()
-                            .title("limit")
                             .borders(Borders::ALL)
                             .border_style(Style::default().fg(input_color)),
                     )
@@ -218,12 +273,28 @@ fn show_index(
                 rects[0],
             );
 
-            // render index lines
+            let lines: Vec<Text> = app
+                .messages
+                .list
+                .iter()
+                .enumerate()
+                .map(|(i, (s, _m))| {
+                    Text::Styled(
+                        s.into(),
+                        match (is_input, i == app.messages.selected as usize) {
+                            (true, _) | (false, false) => app.styles.normal,
+                            (false, true) => app.styles.selected,
+                        },
+                    )
+                })
+                .collect();
+
+            // render message list/index
             f.render_widget(
                 Paragraph::new(lines.iter())
                     .block(
                         Block::default()
-                            .title(&format!("{} notes", lines.len()))
+                            .title(&format!("Found: {}", app.messages.len()))
                             .border_style(Style::default().fg(index_color))
                             .borders(Borders::BOTTOM | Borders::LEFT | Borders::RIGHT),
                     )
@@ -232,6 +303,40 @@ fn show_index(
                     .wrap(true),
                 rects[1],
             );
+            // let lines: Vec<Vec<String>> = app
+            //     .messages
+            //     .list
+            //     .iter()
+            //     .enumerate()
+            //     .map(|(i, (_s, m))| {
+            //         vec![
+            //             m.date_relative.clone(),
+            //             m.headers
+            //                 .get("Subject")
+            //                 .unwrap_or(&"<no subject>".to_string())
+            //                 .clone(),
+            //             Tags(&m.tags).to_string(),
+            //         ]
+            //     })
+            //     .collect();
+            // let rows = lines.iter().enumerate().map(|(i, item)| {
+            //     match (is_input, i == app.messages.selected as usize) {
+            //         (true, _) | (false, false) => {
+            //             Row::StyledData(item.into_iter(), app.styles.normal)
+            //         }
+            //         (false, true) => Row::StyledData(item.into_iter(), app.styles.selected),
+            //     }
+            // });
+            // let table = Table::new([""].iter(), rows)
+            //     .header_style(Style::default().modifier(Modifier::HIDDEN))
+            //     .scroll(scroll)
+            //     .block(Block::default().borders(Borders::BOTTOM | Borders::LEFT | Borders::RIGHT))
+            //     .widths(&[
+            //         Constraint::Length(13),
+            //         Constraint::Length(45),
+            //         Constraint::Min(10),
+            //     ]);
+            // f.render_widget(table, rects[1]);
         })?;
 
         if is_input {
@@ -261,17 +366,11 @@ fn show_index(
         } else {
             match io::stdin().keys().next().unwrap() {
                 Ok(Key::Down) | Ok(Key::Char('j')) => {
-                    if !app.messages.is_empty() && (app.selected < app.messages.len() - 1) {
-                        app.selected += 1;
-                    } else {
-                        app.selected = app.selected;
-                    }
+                    app.messages.select_next();
                 }
                 Ok(Key::Up) | Ok(Key::Char('k')) => {
-                    if !app.messages.is_empty() && app.selected > 0 {
-                        app.selected -= 1;
-                    }
-                    if app.selected as u16 <= scroll && scroll > 0 {
+                    app.messages.select_prev();
+                    if app.messages.selected as u16 <= scroll && scroll > 0 {
                         scroll -= 1
                     }
                 }
@@ -279,22 +378,22 @@ fn show_index(
                 Ok(Key::Char('g')) => match io::stdin().keys().next().unwrap() {
                     Ok(Key::Char('g')) => {
                         scroll = 0;
-                        app.selected = 0;
+                        app.messages.select_first();
                     }
                     _ => {}
                 },
                 Ok(Key::Char('G')) => {
-                    if !app.messages.is_empty() {
-                        scroll = scroll_max;
-                        app.selected = app.messages.len() - 1;
-                    }
+                    app.messages.select_last();
+                    scroll = scroll_max;
                 }
                 Ok(Key::Char('q')) => {
                     app.state = AppState::Exit;
                     break;
                 }
                 Ok(Key::Char('\n')) => {
-                    app.state = AppState::View;
+                    if !app.messages.list.is_empty() {
+                        app.state = AppState::View;
+                    }
                     break;
                 }
                 Ok(Key::Char('m')) => {
@@ -319,18 +418,18 @@ fn view_selected(
 
     let (_, msg) = app
         .messages
-        .get(app.selected)
+        .get_selected()
         .ok_or(failure::format_err!("Selected message missing!"))?;
 
     let (body, atts) = message::body_attachments(&msg.body)?;
 
     let mut headers = vec![];
     for (header, style, default) in &[
-        ("From", app.style_header, "".to_string()),
-        ("To", app.style_header, "".to_string()),
-        ("Date", app.style_header, "".to_string()),
-        ("Attachments", app.style_attachment, atts.len().to_string()),
-        ("Subject", app.style_subject, "".to_string()),
+        ("From", app.styles.header, "".to_string()),
+        ("To", app.styles.header, "".to_string()),
+        ("Date", app.styles.header, "".to_string()),
+        ("Attachments", app.styles.attachment, atts.len().to_string()),
+        ("Subject", app.styles.subject, "".to_string()),
     ] {
         headers.push(Text::styled(
             format!(
@@ -405,8 +504,8 @@ fn view_selected(
                     attachments.push(Text::styled(
                         att,
                         match i as isize == app.selected_att {
-                            true => app.style_selected,
-                            _ => app.style_attachment,
+                            true => app.styles.selected,
+                            _ => app.styles.attachment,
                         },
                     ));
                 }
@@ -458,8 +557,8 @@ fn show_attachment(
     id: &str,
     (part, fname, _mime): &(usize, String, String),
 ) -> Result<(), failure::Error> {
-    let mut tmp = "/tmp/".to_string();
-    tmp.push_str(&fname);
+    let mut tmp_file = std::env::temp_dir();
+    tmp_file.push(fname);
 
     let out = Command::new("notmuch")
         .args(&["show", "--format=raw"])
@@ -467,10 +566,10 @@ fn show_attachment(
         .arg(format!("id:{}", id))
         .output()?;
 
-    std::fs::write(&tmp, out.stdout)?;
+    std::fs::write(&tmp_file, out.stdout)?;
 
-    let _show = Command::new("ristretto").arg(&tmp).output()?;
-    std::fs::remove_file(tmp)?;
+    let _show = Command::new("ristretto").arg(&tmp_file).output()?;
+    std::fs::remove_file(tmp_file)?;
 
     Ok(())
 }
@@ -497,9 +596,7 @@ fn main() -> Result<(), failure::Error> {
                 show_index(&mut app, &mut terminal)?;
             }
             AppState::View => {
-                if !app.messages.is_empty() {
-                    view_selected(&mut app, &mut terminal)?;
-                }
+                view_selected(&mut app, &mut terminal)?;
             }
             AppState::Exit => {
                 break;
