@@ -86,6 +86,7 @@ struct Tags<'a>(&'a Vec<String>);
 impl<'a> fmt::Display for Tags<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut result = String::from("[");
+
         self.0.iter().for_each(|s| {
             result.push_str(&format!("{},", s));
         });
@@ -96,12 +97,10 @@ impl<'a> fmt::Display for Tags<'a> {
     }
 }
 
-// TODO: refactor styles to own struct/configuration object
 struct App {
     state: AppState,
     messages: MessageList,
     styles: Styles,
-    // selected_att: isize,
     search_term: String,
 }
 
@@ -111,10 +110,9 @@ impl App {
             state: AppState::Refresh,
             search_term: "tag:inbox".to_string(),
             messages: MessageList::new(vec![]),
-            // selected_att: -1,
             styles: Styles {
                 selected: Style::default().fg(Color::Yellow).modifier(Modifier::BOLD),
-                normal: Style::default().fg(Color::White),
+                normal: Style::default(),
                 header: Style::default().fg(Color::Cyan),
                 subject: Style::default()
                     .fg(Color::Rgb(255, 255, 255))
@@ -171,7 +169,7 @@ fn compose(app: &mut App) -> Result<(), failure::Error> {
 }
 
 fn refresh_index(app: &mut App) -> Result<(), failure::Error> {
-    debug!("Refreshing index: {}", &app.search_term);
+    debug!("refresh_index: {}", &app.search_term);
 
     if app.search_term.is_empty() {
         app.search_term = "tag:inbox".to_string();
@@ -190,6 +188,8 @@ fn show_index(
     app: &mut App,
     terminal: &mut Terminal<TermionBackend<AlternateScreen<MouseTerminal<RawTerminal<Stdout>>>>>,
 ) -> Result<(), failure::Error> {
+    debug!("show_index");
+
     let mut is_input = false;
     let input = &mut String::new();
     let mut scroll = 0;
@@ -266,9 +266,9 @@ fn show_index(
                     .header_gap(0)
                     .widths(&[
                         Constraint::Length(12),
-                        Constraint::Length(18),
-                        Constraint::Length(45),
-                        Constraint::Min(10),
+                        Constraint::Length(20),
+                        Constraint::Percentage(40),
+                        Constraint::Percentage(30),
                     ]),
                 rects[1],
             );
@@ -300,22 +300,15 @@ fn show_index(
             }
         } else {
             match io::stdin().keys().next().unwrap() {
-                Ok(Key::Down) | Ok(Key::Char('j')) => {
-                    app.messages.select_next();
-                }
-                Ok(Key::Up) | Ok(Key::Char('k')) => {
-                    app.messages.select_prev();
-                }
-
+                Ok(Key::Down) | Ok(Key::Char('j')) => app.messages.select_next(),
+                Ok(Key::Up) | Ok(Key::Char('k')) => app.messages.select_prev(),
                 Ok(Key::Char('g')) => match io::stdin().keys().next().unwrap() {
                     Ok(Key::Char('g')) => {
                         app.messages.select_first();
                     }
                     _ => {}
                 },
-                Ok(Key::Char('G')) => {
-                    app.messages.select_last();
-                }
+                Ok(Key::Char('G')) => app.messages.select_last(),
                 Ok(Key::Char('q')) => {
                     app.state = AppState::Exit;
                     break;
@@ -340,6 +333,8 @@ fn show_index(
 }
 
 fn format_subject(subject: Option<&String>, depth: usize) -> String {
+    debug!("format_subject: {:?} {}", &subject, &depth);
+
     let mut prefix = String::from("");
     for _ in 0..depth {
         prefix.push_str("  ");
@@ -356,6 +351,8 @@ fn format_headers<'a>(
     msg: &message::Message,
     atts: &[message::Attachment],
 ) -> Vec<Text<'a>> {
+    debug!("format_headers");
+
     let mut headers = vec![];
     for (header, style, default) in &[
         ("From", app.styles.header, "".to_string()),
@@ -377,35 +374,22 @@ fn format_headers<'a>(
     headers
 }
 
-fn format_attachments(atts: &Vec<message::Attachment>) -> Vec<String> {
-    atts.iter()
-        .map(|att| {
-            let (file, mime) = match att {
-                message::Attachment::File(_part, fname, mime_type) => {
-                    (fname.as_str(), mime_type.as_str())
-                }
-                _ => ("<alternative>", "text/html"),
-            };
-            format!("[{} ({})]\n", file, mime)
-        })
-        .collect()
-}
-
 // TODO: refactor/split to smaller functions
 fn view_selected(
     app: &mut App,
     terminal: &mut Terminal<TermionBackend<AlternateScreen<MouseTerminal<RawTerminal<Stdout>>>>>,
 ) -> Result<(), failure::Error> {
+    debug!("view_selected");
+
     app.state = AppState::Index;
 
     let msg = app.messages.get_selected()?;
 
     let (body, atts) = message::body_attachments(&msg.body)?;
     let headers = format_headers(&app, &msg, &atts);
-    let attachments = format_attachments(&atts);
 
     let body_len = body.lines().count() as u16;
-    let content_len = body_len + attachments.len() as u16;
+    let content_len = body_len + atts.len() as u16;
     let body_text = vec![Text::Raw(body.into())];
     let (mut scroll, mut scroll_max) = (0, 0);
     let headers_len = headers.len() as u16;
@@ -452,8 +436,12 @@ fn view_selected(
             );
 
             // render attachments
-            let items: Vec<Text> = attachments
+            let items: Vec<Text> = atts
                 .iter()
+                .map(|att| match att {
+                    message::Attachment::File(_, _, _, name) => name,
+                    message::Attachment::Html(_, name) => name,
+                })
                 .enumerate()
                 .map(|(i, s)| match selected_att {
                     Some(selected) if selected == i => {
@@ -517,33 +505,53 @@ fn view_selected(
     Ok(())
 }
 
+fn write_file(fname: &std::path::PathBuf, data: &[u8]) -> Result<(), failure::Error> {
+    use std::fs;
+    use std::os::unix::fs::OpenOptionsExt;
+    match fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .mode(0o600)
+        .open(fname)
+    {
+        Err(e) => failure::bail!(e),
+        Ok(mut f) => f.write_all(data)?,
+    }
+    Ok(())
+}
+
 fn show_attachment(id: &str, attachment: &message::Attachment) -> Result<(), failure::Error> {
+    debug!("show_attachment");
+
     let mut tmp_file = std::env::temp_dir();
+
     match attachment {
-        message::Attachment::File(part, fname, _mime) => {
+        message::Attachment::File(part, fname, _mime, _name) => {
             tmp_file.push(fname);
+
             let child = Command::new("notmuch")
                 .args(&["show", "--format=raw"])
                 .arg(format!("--part={}", part))
                 .arg(format!("id:{}", id))
                 .output()?;
 
-            std::fs::write(&tmp_file, child.stdout)?;
+            write_file(&tmp_file, &child.stdout)?;
         }
-        message::Attachment::Html(s) => {
+        message::Attachment::Html(s, _name) => {
             tmp_file.push(format!("{}.html", id));
-            std::fs::write(&tmp_file, s.as_bytes())?;
+
+            write_file(&tmp_file, s.as_bytes())?;
         }
     }
 
-    let _child = Command::new("xdg-open").arg(&tmp_file).status()?;
-    std::fs::remove_file(tmp_file)?;
+    let _child = Command::new("xdg-open").arg(tmp_file).status()?;
 
     Ok(())
 }
 
 fn main() -> Result<(), failure::Error> {
     env_logger::init();
+    debug!("main");
 
     let stdout = io::stdout().into_raw_mode()?;
     let stdout = MouseTerminal::from(stdout);

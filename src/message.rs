@@ -28,7 +28,6 @@ pub struct Body {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Message {
     pub id: String,
-    #[serde(rename = "match", skip)]
     pub filename: Vec<String>,
     pub timestamp: u64,
     pub date_relative: String,
@@ -39,6 +38,7 @@ pub struct Message {
     pub depth: usize,
     #[serde(skip)]
     pub replys: Vec<Message>,
+    // #[serde(rename = "match", skip)]
     // pub matches: bool,
     // pub excluded: bool,
     // #[serde(skip)]
@@ -53,6 +53,8 @@ pub enum Node {
 }
 
 fn html_to_text(html: &str) -> Result<String, failure::Error> {
+    debug!("html_to_text: {}", html);
+
     let mut child = Command::new("lynx")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -76,8 +78,10 @@ fn html_to_text(html: &str) -> Result<String, failure::Error> {
 }
 
 pub enum Attachment {
-    Html(String),
-    File(usize, String, String),
+    // content, display name
+    Html(String, String),
+    // id, filename, content type, display name
+    File(usize, String, String, String),
 }
 
 pub fn body_attachments(bodys: &Vec<Body>) -> Result<(String, Vec<Attachment>), failure::Error> {
@@ -91,9 +95,7 @@ pub fn body_attachments(bodys: &Vec<Body>) -> Result<(String, Vec<Attachment>), 
     for b in bodys {
         match &b.content {
             Some(Content::Str(s)) => match b.content_type.as_str() {
-                "text/html" => {
-                    body_html.push_str(s);
-                }
+                "text/html" => body_html.push_str(s),
                 _ => body.push_str(s),
             },
             Some(Content::Array(bs)) => {
@@ -109,6 +111,7 @@ pub fn body_attachments(bodys: &Vec<Body>) -> Result<(String, Vec<Attachment>), 
                 b.id,
                 filename.to_string(),
                 b.content_type.to_string(),
+                format!("[{} ({})]\n", filename, b.content_type),
             ));
         }
     }
@@ -116,7 +119,10 @@ pub fn body_attachments(bodys: &Vec<Body>) -> Result<(String, Vec<Attachment>), 
         body = html_to_text(&body_html)?;
     }
     if !body_html.is_empty() {
-        attachments.push(Attachment::Html(body_html));
+        attachments.push(Attachment::Html(
+            body_html,
+            "[<alternative>  (text/html)]\n".into(),
+        ));
     }
 
     debug!(
@@ -133,7 +139,7 @@ pub fn parse_thread(
     depth: usize,
     messages: &mut Vec<Message>,
 ) -> Result<(), failure::Error> {
-    // let mut result = vec![];
+    debug!("parse_thread");
 
     if let Some(Node::Msg(msg)) = thread.iter().cloned().next() {
         let mut message = msg.clone();
@@ -143,7 +149,6 @@ pub fn parse_thread(
             match reply {
                 Node::Children(childs) => {
                     for child in childs {
-                        // messages.push(child);
                         parse_thread(&child, depth + 1, messages)?;
                     }
                 }
@@ -158,11 +163,10 @@ pub fn parse_thread(
 }
 
 pub fn parse_messages(search_term: &str) -> Result<Vec<Message>, failure::Error> {
-    debug!("Parsing search result: {}", search_term);
+    debug!("parse_messages: {}", search_term);
 
     let mut result: Vec<Message> = vec![];
 
-    // TODO: remove path (e.g. use env)
     let output = Command::new("notmuch")
         .arg("show")
         .arg("--format=json")
@@ -175,7 +179,6 @@ pub fn parse_messages(search_term: &str) -> Result<Vec<Message>, failure::Error>
     for threads in threadset.iter() {
         for thread in threads.iter() {
             parse_thread(thread, 0, &mut result)?;
-            // result.append(&mut t);
         }
     }
 
