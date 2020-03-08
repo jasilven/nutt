@@ -85,7 +85,7 @@ pub enum Attachment {
 }
 
 pub fn body_attachments(bodys: &Vec<Body>) -> Result<(String, Vec<Attachment>), failure::Error> {
-    debug!("body_attachments: {:?}", &bodys);
+    debug!("body_attachments");
 
     let mut body = String::from("");
     let mut body_html = String::from("");

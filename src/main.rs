@@ -1,31 +1,29 @@
-use chrono::prelude::*;
+use emailmessage::Message;
 use log::*;
 use std::fmt;
-use std::fs::File;
 use std::io;
 use std::io::prelude::*;
 use std::io::Stdout;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use termion::cursor::Goto;
 use termion::event::Key;
-use termion::input::{MouseTerminal, TermRead};
+use termion::input::TermRead;
 use termion::raw::{IntoRawMode, RawTerminal};
-use termion::screen::AlternateScreen;
 use tui::backend::TermionBackend;
 use tui::layout::{Alignment, Constraint, Direction, Layout};
 use tui::style::{Color, Modifier, Style};
 use tui::widgets::{Block, Borders, Paragraph, Row, Table, Text};
 use tui::Terminal;
 
-mod message;
+mod notmuch;
 
 struct MessageList {
-    list: Vec<message::Message>,
+    list: Vec<notmuch::Message>,
     selected: u16,
 }
 
 impl MessageList {
-    fn new(list: Vec<message::Message>) -> Self {
+    fn new(list: Vec<notmuch::Message>) -> Self {
         MessageList { list, selected: 0 }
     }
 
@@ -49,7 +47,7 @@ impl MessageList {
         self.selected = self.list.len() as u16 - 1;
     }
 
-    fn get_selected(&self) -> Result<&message::Message, failure::Error> {
+    fn get_selected(&self) -> Result<&notmuch::Message, failure::Error> {
         if !self.list.is_empty() {
             self.list
                 .get(self.selected as usize)
@@ -125,46 +123,47 @@ impl App {
 
 // TODO: this sits here only as placeholder method. Whole thing should be implemented properly
 #[allow(dead_code)]
-fn compose(app: &mut App) -> Result<(), failure::Error> {
-    debug!("Compose called");
+fn compose(
+    app: &mut App,
+    _terminal: &mut Terminal<TermionBackend<RawTerminal<Stdout>>>,
+) -> Result<(), failure::Error> {
+    debug!("compose");
 
-    app.state = AppState::Index;
+    app.state = AppState::Refresh;
 
-    let fname = "/tmp/tmp-mail.txt";
-    let mut file = File::open(fname)?;
+    let mut tmp_file = std::env::temp_dir();
+    tmp_file.push("nutt-new.txt");
 
-    let _ = Command::new("/usr/bin/nvim")
-        .arg(fname)
+    let _ = Command::new("nvim")
+        .arg(&tmp_file)
         .status()
         .expect("Failed to execute 'nvim'");
 
-    let mut body = "".to_string();
-    file.read_to_string(&mut body)?;
+    let mut body = std::fs::read_to_string(&tmp_file)?;
+    if body.lines().count() == 1 {
+        body.push('\n');
+    }
 
-    let now = Local::now();
-    let id_fmt = &format!(
-        "<%Y%m%d%H%M%S.%f@localhost:{}>",
-        std::process::id().to_string()
-    );
-    let email = format!(
-        "Date: {}\nTo: {}\nSubject: {}\nMessage-Id:{}\nFrom: {}\n\n{}\n",
-        now.to_rfc2822(),
-        "me",
-        "Otsikko",
-        now.format(id_fmt),
-        "me",
-        body
-    );
-    file.write_all(email.as_bytes())?;
-    file.flush()?;
+    std::fs::remove_file(tmp_file)?;
+    // must include fields: From, Date
+    let email: emailmessage::Message<&str> = Message::builder()
+        .from("Me <me@localhost>".parse().unwrap())
+        .date_now()
+        .to("Me <me@localhost>".parse().unwrap())
+        .subject("<subject>")
+        .body(&body);
 
-    let _ = Command::new("/usr/bin/notmuch")
+    let mut child = Command::new("notmuch")
         .arg("insert")
-        .stdin(file)
-        .status()
-        .expect("Failed to execute 'notmuch'");
+        .stdin(Stdio::piped())
+        .spawn()?;
 
-    std::fs::remove_file(fname)?;
+    let stdin = child
+        .stdin
+        .as_mut()
+        .ok_or(failure::format_err!("Failed to run 'notmuch insert'"))?;
+    stdin.write_all(format!("{}", email).as_bytes())?;
+
     Ok(())
 }
 
@@ -175,7 +174,7 @@ fn refresh_index(app: &mut App) -> Result<(), failure::Error> {
         app.search_term = "tag:inbox".to_string();
     }
 
-    let messages = message::parse_messages(&app.search_term)?;
+    let messages = notmuch::parse_messages(&app.search_term)?;
     app.messages = MessageList::new(messages);
     app.state = AppState::Index;
 
@@ -186,7 +185,7 @@ fn refresh_index(app: &mut App) -> Result<(), failure::Error> {
 // TODO: simplify scrolling logic which is awful now
 fn show_index(
     app: &mut App,
-    terminal: &mut Terminal<TermionBackend<AlternateScreen<MouseTerminal<RawTerminal<Stdout>>>>>,
+    terminal: &mut Terminal<TermionBackend<RawTerminal<Stdout>>>,
 ) -> Result<(), failure::Error> {
     debug!("show_index");
 
@@ -333,7 +332,7 @@ fn show_index(
 }
 
 fn format_subject(subject: Option<&String>, depth: usize) -> String {
-    debug!("format_subject: {:?} {}", &subject, &depth);
+    //    debug!("format_subject: {:?} {}", &subject, &depth);
 
     let mut prefix = String::from("");
     for _ in 0..depth {
@@ -348,8 +347,8 @@ fn format_subject(subject: Option<&String>, depth: usize) -> String {
 
 fn format_headers<'a>(
     app: &App,
-    msg: &message::Message,
-    atts: &[message::Attachment],
+    msg: &notmuch::Message,
+    atts: &[notmuch::Attachment],
 ) -> Vec<Text<'a>> {
     debug!("format_headers");
 
@@ -377,7 +376,7 @@ fn format_headers<'a>(
 // TODO: refactor/split to smaller functions
 fn view_selected(
     app: &mut App,
-    terminal: &mut Terminal<TermionBackend<AlternateScreen<MouseTerminal<RawTerminal<Stdout>>>>>,
+    terminal: &mut Terminal<TermionBackend<RawTerminal<Stdout>>>,
 ) -> Result<(), failure::Error> {
     debug!("view_selected");
 
@@ -385,7 +384,7 @@ fn view_selected(
 
     let msg = app.messages.get_selected()?;
 
-    let (body, atts) = message::body_attachments(&msg.body)?;
+    let (body, atts) = notmuch::body_attachments(&msg.body)?;
     let headers = format_headers(&app, &msg, &atts);
 
     let body_len = body.lines().count() as u16;
@@ -439,8 +438,8 @@ fn view_selected(
             let items: Vec<Text> = atts
                 .iter()
                 .map(|att| match att {
-                    message::Attachment::File(_, _, _, name) => name,
-                    message::Attachment::Html(_, name) => name,
+                    notmuch::Attachment::File(_, _, _, name) => name,
+                    notmuch::Attachment::Html(_, name) => name,
                 })
                 .enumerate()
                 .map(|(i, s)| match selected_att {
@@ -520,13 +519,13 @@ fn write_file(fname: &std::path::PathBuf, data: &[u8]) -> Result<(), failure::Er
     Ok(())
 }
 
-fn show_attachment(id: &str, attachment: &message::Attachment) -> Result<(), failure::Error> {
+fn show_attachment(id: &str, attachment: &notmuch::Attachment) -> Result<(), failure::Error> {
     debug!("show_attachment");
 
     let mut tmp_file = std::env::temp_dir();
 
     match attachment {
-        message::Attachment::File(part, fname, _mime, _name) => {
+        notmuch::Attachment::File(part, fname, _mime, _name) => {
             tmp_file.push(fname);
 
             let child = Command::new("notmuch")
@@ -537,7 +536,7 @@ fn show_attachment(id: &str, attachment: &message::Attachment) -> Result<(), fai
 
             write_file(&tmp_file, &child.stdout)?;
         }
-        message::Attachment::Html(s, _name) => {
+        notmuch::Attachment::Html(s, _name) => {
             tmp_file.push(format!("{}.html", id));
 
             write_file(&tmp_file, s.as_bytes())?;
@@ -549,23 +548,29 @@ fn show_attachment(id: &str, attachment: &message::Attachment) -> Result<(), fai
     Ok(())
 }
 
-fn main() -> Result<(), failure::Error> {
-    env_logger::init();
-    debug!("main");
-
+fn get_terminal() -> Result<Terminal<TermionBackend<RawTerminal<Stdout>>>, failure::Error> {
     let stdout = io::stdout().into_raw_mode()?;
-    let stdout = MouseTerminal::from(stdout);
-    let stdout = AlternateScreen::from(stdout);
+    // let stdout = MouseTerminal::from(stdout);
+    // let stdout = AlternateScreen::from(stdout);
     let backend = TermionBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
     terminal.hide_cursor()?;
 
+    Ok(terminal)
+}
+
+fn main() -> Result<(), failure::Error> {
+    env_logger::init();
+    debug!("main");
+
     let mut app = App::new();
+    let mut terminal = get_terminal()?;
 
     loop {
         match app.state {
             AppState::Refresh => {
+                debug!("AppState::Refresh");
                 refresh_index(&mut app)?;
             }
             AppState::Index => {
@@ -573,6 +578,9 @@ fn main() -> Result<(), failure::Error> {
             }
             AppState::View => {
                 view_selected(&mut app, &mut terminal)?;
+            }
+            AppState::Compose => {
+                compose(&mut app, &mut terminal)?;
             }
             AppState::Exit => {
                 break;
