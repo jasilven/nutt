@@ -129,8 +129,6 @@ fn compose(
 ) -> Result<(), failure::Error> {
     debug!("compose");
 
-    app.state = AppState::Refresh;
-
     let mut tmp_file = std::env::temp_dir();
     tmp_file.push("nutt-new.txt");
 
@@ -163,6 +161,8 @@ fn compose(
         .as_mut()
         .ok_or(failure::format_err!("Failed to run 'notmuch insert'"))?;
     stdin.write_all(format!("{}", email).as_bytes())?;
+
+    app.state = AppState::Refresh;
 
     Ok(())
 }
