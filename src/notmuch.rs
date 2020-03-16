@@ -184,3 +184,22 @@ pub fn parse_messages(search_term: &str) -> Result<Vec<Message>, failure::Error>
 
     Ok(result)
 }
+
+pub fn insert_message(data: &[u8]) -> Result<(), failure::Error> {
+    debug!("insert_messages");
+
+    let mut child = Command::new("notmuch")
+        .arg("insert")
+        .stdin(Stdio::piped())
+        .spawn()?;
+
+    let stdin = child
+        .stdin
+        .as_mut()
+        .ok_or(failure::format_err!("Failed to run 'notmuch insert'"))?;
+    stdin.write_all(data)?;
+    stdin.flush()?;
+    child.wait()?;
+
+    Ok(())
+}

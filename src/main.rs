@@ -121,7 +121,6 @@ impl App {
     }
 }
 
-// TODO: this sits here only as placeholder method. Whole thing should be implemented properly
 #[allow(dead_code)]
 fn compose(
     app: &mut App,
@@ -151,16 +150,7 @@ fn compose(
         .subject("<subject>")
         .body(&body);
 
-    let mut child = Command::new("notmuch")
-        .arg("insert")
-        .stdin(Stdio::piped())
-        .spawn()?;
-
-    let stdin = child
-        .stdin
-        .as_mut()
-        .ok_or(failure::format_err!("Failed to run 'notmuch insert'"))?;
-    stdin.write_all(format!("{}", email).as_bytes())?;
+    notmuch::insert_message(format!("{}", email).as_bytes())?;
 
     app.state = AppState::Refresh;
 
@@ -178,6 +168,7 @@ fn refresh_index(app: &mut App) -> Result<(), failure::Error> {
     app.messages = MessageList::new(messages);
     app.state = AppState::Index;
 
+    debug!("refresh_index, count: {}", app.messages.len());
     Ok(())
 }
 
@@ -187,7 +178,7 @@ fn show_index(
     app: &mut App,
     terminal: &mut Terminal<TermionBackend<RawTerminal<Stdout>>>,
 ) -> Result<(), failure::Error> {
-    debug!("show_index");
+    debug!("show_index, count: {}", app.messages.len());
 
     let mut is_input = false;
     let input = &mut String::new();
@@ -550,8 +541,6 @@ fn show_attachment(id: &str, attachment: &notmuch::Attachment) -> Result<(), fai
 
 fn get_terminal() -> Result<Terminal<TermionBackend<RawTerminal<Stdout>>>, failure::Error> {
     let stdout = io::stdout().into_raw_mode()?;
-    // let stdout = MouseTerminal::from(stdout);
-    // let stdout = AlternateScreen::from(stdout);
     let backend = TermionBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
